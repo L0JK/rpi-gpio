@@ -22,7 +22,7 @@ _"turn on the kitchen light"_ or _"give power to pin 17"_ — both work.
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR_USERNAME/rpi-gpio.git
+git clone https://github.com/L0JK/rpi-gpio.git
 cd rpi-gpio
 
 # 2. Install dependencies (only needed on non-RPi-5 boards)
