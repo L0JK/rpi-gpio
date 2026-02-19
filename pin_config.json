@@ -1,0 +1,27 @@
+{
+  "devices": {
+    "kitchen_light": {
+      "pin": 17,
+      "type": "output",
+      "description": "LED strip over kitchen counter"
+    },
+    "front_door_relay": {
+      "pin": 27,
+      "type": "relay",
+      "active_low": true,
+      "description": "Relay that controls the front door lock (active LOW)"
+    },
+    "motion_sensor": {
+      "pin": 4,
+      "type": "input",
+      "pull_up": false,
+      "description": "PIR motion sensor in hallway — HIGH when motion detected"
+    },
+    "cooling_fan": {
+      "pin": 18,
+      "type": "pwm",
+      "frequency": 100,
+      "description": "PWM-controlled cooling fan — use set command with level 0.0–1.0"
+    }
+  }
+}
