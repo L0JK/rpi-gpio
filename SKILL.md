@@ -1,82 +1,157 @@
 # GPIO Control Skill
 
-Control named devices connected to Raspberry Pi GPIO pins.
-Devices are defined in `pin_config.json` — the AI works with device names, not pin numbers.
+Control Raspberry Pi GPIO pins by **name or pin number**.
+Pins can be named at any time — names are stored in `pin_config.json`.
 
 ## Requirements
 
 - Raspberry Pi (optimised for RPi 5 with `pinctrl`)
 - Python 3.11+
-- `pip install gpiozero lgpio` (only needed as fallback on non-RPi-5 boards)
+- `pip install gpiozero lgpio` (fallback on older boards)
 
 ---
 
-## Step 1 — Define your devices
+## How pins are addressed
 
-Edit `pin_config.json` to describe what is connected to each pin.
-You can also register devices at runtime using the `register` command (see below).
+Every command that targets a pin accepts either:
+- A **registered name**: `"kitchen_light"`, `"fan"`, `"door_sensor"`
+- A **BCM pin number** (as string or integer): `"17"`, `17`
 
-```json
-{
-  "devices": {
-    "kitchen_light": {
-      "pin": 17,
-      "type": "output",
-      "description": "LED strip over kitchen counter"
-    },
-    "front_door_relay": {
-      "pin": 27,
-      "type": "relay",
-      "active_low": true,
-      "description": "Relay that controls the front door lock"
-    },
-    "motion_sensor": {
-      "pin": 4,
-      "type": "input",
-      "pull_up": false,
-      "description": "PIR motion sensor in hallway"
-    },
-    "cooling_fan": {
-      "pin": 18,
-      "type": "pwm",
-      "frequency": 100,
-      "description": "PWM-controlled cooling fan"
-    }
-  }
-}
-```
+Unregistered pins work fine with their number — you can name them later.
 
-**Device types:**
-| type | Use for |
-|------|---------|
-| `output` | LEDs, buzzers, simple switches |
-| `relay` | Relays (supports `active_low: true`) |
-| `input` | Buttons, PIR sensors, reed switches |
-| `pwm` | Fans, dimmable LEDs, servos |
+> **When the user tells you what is connected to a pin, always call `rename` or `register` immediately so the name is saved for future sessions.**
 
 ---
 
-## Step 2 — Call the skill
+## How to call the skill
 
 ```bash
-python3 gpio_skill.py --json '<JSON payload>'
+python3 gpio_skill.py --json '<JSON>'
 ```
 
-Or pipe from stdin:
-
-```bash
-echo '<JSON>' | python3 gpio_skill.py
-```
-
-All responses are JSON. Always check `"success": true/false` first.
+All output is a single JSON object on stdout.
+`"success": true` = OK, `"success": false` = error (see `"error"` field).
 
 ---
 
 ## Commands
 
-### `list_devices` — See all registered devices
+### `activate` — Give power to a pin (set HIGH)
 
-Always call this first if you are unsure what devices exist.
+```bash
+python3 gpio_skill.py --json '{"command":"activate","device":"17"}'
+python3 gpio_skill.py --json '{"command":"activate","device":"kitchen_light"}'
+```
+```json
+{"success": true, "pin": 17, "value": true, "device": "kitchen_light", "backend": "pinctrl"}
+```
+
+---
+
+### `deactivate` — Cut power to a pin (set LOW)
+
+```bash
+python3 gpio_skill.py --json '{"command":"deactivate","device":"kitchen_light"}'
+python3 gpio_skill.py --json '{"command":"deactivate","device":"17"}'
+```
+
+---
+
+### `toggle` — Flip a pin (on→off or off→on)
+
+```bash
+python3 gpio_skill.py --json '{"command":"toggle","device":"kitchen_light"}'
+```
+
+---
+
+### `read` — Read the current state of a pin
+
+Returns `"value": true` (HIGH / 3.3 V) or `"value": false` (LOW / GND).
+
+```bash
+python3 gpio_skill.py --json '{"command":"read","device":"motion_sensor"}'
+python3 gpio_skill.py --json '{"command":"read","device":"4"}'
+```
+```json
+{"success": true, "pin": 4, "value": true, "device": "motion_sensor", "description": "PIR sensor in hallway"}
+```
+
+---
+
+### `set` — Set PWM level (fan speed, LED brightness)
+
+`level` is a float from `0.0` (off) to `1.0` (full).
+
+```bash
+python3 gpio_skill.py --json '{"command":"set","device":"cooling_fan","level":0.7}'
+python3 gpio_skill.py --json '{"command":"set","device":"18","level":0.5}'
+```
+```json
+{"success": true, "pin": 18, "duty_cycle": 0.7, "frequency": 100.0, "device": "cooling_fan"}
+```
+
+---
+
+### `rename` — Give a pin a name (or change its name)
+
+Use this when the user says what something is connected to.
+`device` can be the current name OR just the pin number.
+
+```bash
+# Name an unnamed pin
+python3 gpio_skill.py --json '{"command":"rename","device":"17","new_name":"kitchen_light"}'
+
+# Rename an existing device
+python3 gpio_skill.py --json '{"command":"rename","device":"kitchen_light","new_name":"counter_strip"}'
+```
+```json
+{"success": true, "renamed_to": "kitchen_light", "pin": 17}
+```
+
+After renaming, the old name no longer works — use the new name.
+
+---
+
+### `register` — Add a pin with full configuration
+
+Use when you need to set the type or extra options (e.g. relay, sensor, PWM).
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | yes | Friendly name |
+| `pin` | yes | BCM pin number |
+| `type` | no | `output` (default), `relay`, `input`, `pwm` |
+| `description` | no | Human-readable note |
+| `active_low` | no | `true` for relays wired active-LOW |
+| `pull_up` | no | `true` to enable pull-up resistor (inputs) |
+| `frequency` | no | PWM frequency in Hz (default `100`) |
+
+```bash
+python3 gpio_skill.py --json '{
+  "command": "register",
+  "name": "front_door_relay",
+  "pin": 27,
+  "type": "relay",
+  "active_low": true,
+  "description": "Relay controlling front door lock"
+}'
+```
+
+---
+
+### `unregister` — Remove a name
+
+```bash
+python3 gpio_skill.py --json '{"command":"unregister","name":"kitchen_light"}'
+python3 gpio_skill.py --json '{"command":"unregister","pin":"17"}'
+```
+
+---
+
+### `list_devices` — Show all named pins
+
+Call this to see what is currently registered before taking action.
 
 ```bash
 python3 gpio_skill.py --json '{"command":"list_devices"}'
@@ -85,142 +160,45 @@ python3 gpio_skill.py --json '{"command":"list_devices"}'
 {
   "success": true,
   "devices": [
-    {"name": "kitchen_light", "pin": 17, "type": "output", "description": "LED strip over kitchen counter"},
-    {"name": "cooling_fan",   "pin": 18, "type": "pwm",    "description": "PWM-controlled cooling fan"}
+    {"name": "kitchen_light",   "pin": 17, "type": "output", "description": "LED strip over kitchen counter"},
+    {"name": "motion_sensor",   "pin": 4,  "type": "input",  "description": "PIR sensor in hallway"},
+    {"name": "cooling_fan",     "pin": 18, "type": "pwm",    "description": "PWM cooling fan"}
   ]
 }
 ```
 
 ---
 
-### `activate` — Turn a device ON
+## Decision guide for the AI agent
 
-Works with type `output` and `relay`.
-
-```bash
-python3 gpio_skill.py --json '{"command":"activate","device":"kitchen_light"}'
-```
-```json
-{"success": true, "device": "kitchen_light", "pin": 17, "value": true, "backend": "pinctrl"}
-```
-
----
-
-### `deactivate` — Turn a device OFF
-
-```bash
-python3 gpio_skill.py --json '{"command":"deactivate","device":"kitchen_light"}'
-```
-```json
-{"success": true, "device": "kitchen_light", "pin": 17, "value": false, "backend": "pinctrl"}
-```
-
----
-
-### `toggle` — Flip a device (on→off, off→on)
-
-```bash
-python3 gpio_skill.py --json '{"command":"toggle","device":"kitchen_light"}'
-```
-```json
-{"success": true, "device": "kitchen_light", "pin": 17, "value": false, "backend": "pinctrl"}
-```
-
----
-
-### `read` — Read current state of a device
-
-Works with all types. Returns `"value": true` for HIGH, `false` for LOW.
-
-```bash
-python3 gpio_skill.py --json '{"command":"read","device":"motion_sensor"}'
-```
-```json
-{"success": true, "device": "motion_sensor", "pin": 4, "value": true, "description": "PIR motion sensor in hallway"}
-```
-
----
-
-### `set` — Set PWM level (fans, dimmers, servos)
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `device` | string | Name of a `pwm` device |
-| `level` | float | `0.0` = off, `1.0` = full speed/brightness |
-
-```bash
-python3 gpio_skill.py --json '{"command":"set","device":"cooling_fan","level":0.6}'
-```
-```json
-{"success": true, "device": "cooling_fan", "pin": 18, "duty_cycle": 0.6, "frequency": 100.0}
-```
-
----
-
-### `register` — Add a new device at runtime
-
-```bash
-python3 gpio_skill.py --json '{
-  "command": "register",
-  "name": "bedroom_lamp",
-  "pin": 22,
-  "type": "output",
-  "description": "Bedside lamp in bedroom"
-}'
-```
-```json
-{"success": true, "registered": "bedroom_lamp", "pin": 22, "type": "output"}
-```
-
-The device is saved to `pin_config.json` immediately and available for all future calls.
-
----
-
-### `unregister` — Remove a device
-
-```bash
-python3 gpio_skill.py --json '{"command":"unregister","name":"bedroom_lamp"}'
-```
-```json
-{"success": true, "unregistered": "bedroom_lamp"}
-```
-
----
-
-## Error responses
-
-```json
-{"success": false, "error": "Unknown device: 'oven'. Call list_devices() to see all."}
-```
-
----
-
-## Common tasks for the AI agent
-
-| User says | Command to use |
-|-----------|---------------|
-| "Turn on the kitchen light" | `activate`, device `kitchen_light` |
-| "Turn off the fan" | `deactivate`, device `cooling_fan` |
-| "Dim the light to 30%" | `set`, device + `level: 0.3` |
-| "Is there motion in the hallway?" | `read`, device `motion_sensor` |
-| "I connected a buzzer to pin 23" | `register` with name, pin, type |
-| "What devices are available?" | `list_devices` |
-| "Toggle the relay" | `toggle`, device name |
+| User says | Action |
+|-----------|--------|
+| "Skru på pin 17" | `activate`, device `"17"` |
+| "Gi strøm til kjøkkenlyset" | `activate`, device `"kitchen_light"` |
+| "Slå av viften" | `deactivate`, device `"cooling_fan"` |
+| "Sett viften til 70%" | `set`, device `"cooling_fan"`, level `0.7` |
+| "Les bevegelsessensoren" | `read`, device `"motion_sensor"` |
+| "Jeg koblet til en LED på pin 22" | `rename`, device `"22"`, new_name (ask user for name) |
+| "Kall pin 17 for kjøkkenlys" | `rename`, device `"17"`, new_name `"kitchen_light"` |
+| "Hva er koblet til?" | `list_devices` |
+| "Fjern kjøkkenlyset fra lista" | `unregister`, name `"kitchen_light"` |
 
 ---
 
 ## Use as a Python module
 
 ```python
-from gpio_skill import activate, deactivate, read, set_level, list_devices, register
+from gpio_skill import activate, deactivate, toggle, read, set_level, rename, list_devices
 
-# Turn on a device
-activate("kitchen_light")
+activate("kitchen_light")      # by name
+activate(17)                   # by pin number — same result
 
-# Read a sensor
+rename(22, "bedroom_lamp")     # give pin 22 a name
+deactivate("bedroom_lamp")
+
 result = read("motion_sensor")
-print(result["value"])  # True if motion detected
+if result["value"]:
+    print("Motion detected!")
 
-# Add a new device programmatically
-register("garage_door", pin=23, device_type="relay", description="Garage door opener")
+set_level("cooling_fan", 0.6)  # 60% speed
 ```

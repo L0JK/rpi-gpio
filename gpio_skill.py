@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 gpio_skill.py — GPIO Skill for OpenClaw
-Devices are defined in pin_config.json.
-The AI uses device names (e.g. "kitchen_light") — not pin numbers.
 
-Can be used as:
-  CLI:    python3 gpio_skill.py --json '{"command":"activate","device":"kitchen_light"}'
-  Module: from gpio_skill import activate, read, list_devices
+Pins can be addressed by BCM number OR by registered name.
+Names are stored in pin_config.json and can be changed at any time.
+
+CLI:    python3 gpio_skill.py --json '{"command":"activate","device":"17"}'
+        python3 gpio_skill.py --json '{"command":"activate","device":"kitchen_light"}'
+Module: from gpio_skill import activate, deactivate, toggle, read, set_level, rename
 """
 
 import json
@@ -16,13 +17,12 @@ import shutil
 import argparse
 import os
 from pathlib import Path
-from typing import Any
 
 CONFIG_FILE = Path(__file__).parent / "pin_config.json"
 
 
 # ---------------------------------------------------------------------------
-# Config helpers
+# Config
 # ---------------------------------------------------------------------------
 
 def load_config() -> dict:
@@ -37,12 +37,39 @@ def _save_config(config: dict) -> None:
         json.dump(config, f, indent=2)
 
 
-def _get_device(name: str, config: dict) -> dict | None:
-    return config.get("devices", {}).get(name)
+def _resolve(identifier: str | int, config: dict) -> tuple[int, dict]:
+    """
+    Resolve a name or BCM pin number to (pin_number, device_dict).
+    If the pin is not registered, returns a minimal device dict.
+    Raises ValueError if identifier cannot be resolved.
+    """
+    devices = config.get("devices", {})
+
+    # 1. Try by registered name
+    if str(identifier) in devices:
+        d = devices[str(identifier)]
+        return d["pin"], d
+
+    # 2. Try to parse as a pin number
+    try:
+        pin = int(identifier)
+    except (ValueError, TypeError):
+        raise ValueError(
+            f"'{identifier}' is not a registered name and not a pin number. "
+            "Use list_devices to see registered names."
+        )
+
+    # 3. Pin number given — check if it has a registered name
+    for d in devices.values():
+        if d["pin"] == pin:
+            return pin, d
+
+    # 4. Unregistered pin — return a default output device
+    return pin, {"pin": pin, "type": "output", "description": f"Pin {pin} (not registered)"}
 
 
 # ---------------------------------------------------------------------------
-# Low-level GPIO backends
+# Low-level GPIO
 # ---------------------------------------------------------------------------
 
 def _pinctrl_available() -> bool:
@@ -50,7 +77,6 @@ def _pinctrl_available() -> bool:
 
 
 def _write_pin(pin: int, value: bool) -> dict:
-    """Write HIGH/LOW to a pin. Uses pinctrl (persistent) on RPi 5, else gpiozero."""
     if _pinctrl_available():
         level = "dh" if value else "dl"
         try:
@@ -74,7 +100,6 @@ def _write_pin(pin: int, value: bool) -> dict:
 
 
 def _read_pin(pin: int, pull_up: bool = False) -> dict:
-    """Read current value of a pin."""
     if _pinctrl_available():
         try:
             r = subprocess.run(
@@ -101,7 +126,6 @@ def _read_pin(pin: int, pull_up: bool = False) -> dict:
 
 
 def _write_pwm(pin: int, duty_cycle: float, frequency: float = 100.0) -> dict:
-    """Set PWM duty cycle on a pin (0.0–1.0)."""
     if not 0.0 <= duty_cycle <= 1.0:
         return {"success": False, "error": "duty_cycle must be 0.0–1.0"}
     os.environ.setdefault("GPIOZERO_PIN_FACTORY", "lgpio")
@@ -119,191 +143,231 @@ def _write_pwm(pin: int, duty_cycle: float, frequency: float = 100.0) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Public API — callable as functions from other Python scripts
+# Public API
 # ---------------------------------------------------------------------------
 
-def activate(device_name: str, config: dict | None = None) -> dict:
-    """Turn on a named output/relay device."""
+def activate(identifier: str | int, config: dict | None = None) -> dict:
+    """Turn on a pin — accepts name or BCM pin number."""
     config = config or load_config()
-    device = _get_device(device_name, config)
-    if device is None:
-        return {"success": False, "error": f"Unknown device: '{device_name}'. Call list_devices() to see all."}
-    if device["type"] not in ("output", "relay"):
-        return {"success": False, "error": f"'{device_name}' is type '{device['type']}', not output/relay."}
+    try:
+        pin, device = _resolve(identifier, config)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
     value = not device.get("active_low", False)
-    result = _write_pin(device["pin"], value)
-    result.update({"device": device_name, "description": device.get("description", "")})
+    result = _write_pin(pin, value)
+    result.update({"device": str(identifier), "description": device.get("description", "")})
     return result
 
 
-def deactivate(device_name: str, config: dict | None = None) -> dict:
-    """Turn off a named output/relay device."""
+def deactivate(identifier: str | int, config: dict | None = None) -> dict:
+    """Turn off a pin — accepts name or BCM pin number."""
     config = config or load_config()
-    device = _get_device(device_name, config)
-    if device is None:
-        return {"success": False, "error": f"Unknown device: '{device_name}'. Call list_devices() to see all."}
-    if device["type"] not in ("output", "relay"):
-        return {"success": False, "error": f"'{device_name}' is type '{device['type']}', not output/relay."}
+    try:
+        pin, device = _resolve(identifier, config)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
     value = device.get("active_low", False)
-    result = _write_pin(device["pin"], value)
-    result.update({"device": device_name, "description": device.get("description", "")})
+    result = _write_pin(pin, value)
+    result.update({"device": str(identifier), "description": device.get("description", "")})
     return result
 
 
-def toggle(device_name: str, config: dict | None = None) -> dict:
-    """Toggle a named output/relay device (on→off, off→on)."""
+def toggle(identifier: str | int, config: dict | None = None) -> dict:
+    """Toggle a pin (on→off, off→on) — accepts name or BCM pin number."""
     config = config or load_config()
-    current = read(device_name, config)
+    current = read(identifier, config)
     if not current.get("success"):
         return current
     if current.get("value"):
-        return deactivate(device_name, config)
-    return activate(device_name, config)
+        return deactivate(identifier, config)
+    return activate(identifier, config)
 
 
-def read(device_name: str, config: dict | None = None) -> dict:
-    """Read current state of a named device (any type)."""
+def read(identifier: str | int, config: dict | None = None) -> dict:
+    """Read current state of a pin — accepts name or BCM pin number."""
     config = config or load_config()
-    device = _get_device(device_name, config)
-    if device is None:
-        return {"success": False, "error": f"Unknown device: '{device_name}'. Call list_devices() to see all."}
-    pull_up = device.get("pull_up", False)
-    result = _read_pin(device["pin"], pull_up)
-    result.update({"device": device_name, "description": device.get("description", "")})
+    try:
+        pin, device = _resolve(identifier, config)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    result = _read_pin(pin, device.get("pull_up", False))
+    result.update({"device": str(identifier), "description": device.get("description", "")})
     return result
 
 
-def set_level(device_name: str, level: float, config: dict | None = None) -> dict:
-    """Set PWM level (0.0–1.0) for a named PWM device (fan speed, LED brightness, servo)."""
+def set_level(identifier: str | int, level: float, config: dict | None = None) -> dict:
+    """Set PWM level (0.0–1.0) — accepts name or BCM pin number."""
     config = config or load_config()
-    device = _get_device(device_name, config)
-    if device is None:
-        return {"success": False, "error": f"Unknown device: '{device_name}'. Call list_devices() to see all."}
-    if device["type"] != "pwm":
-        return {"success": False, "error": f"'{device_name}' is type '{device['type']}', not pwm."}
-    result = _write_pwm(device["pin"], level, device.get("frequency", 100.0))
-    result.update({"device": device_name, "description": device.get("description", "")})
+    try:
+        pin, device = _resolve(identifier, config)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    result = _write_pwm(pin, level, device.get("frequency", 100.0))
+    result.update({"device": str(identifier), "description": device.get("description", "")})
     return result
 
 
-def list_devices(config: dict | None = None) -> dict:
-    """Return all registered devices with their pin, type and description."""
+def rename(identifier: str | int, new_name: str, config: dict | None = None) -> dict:
+    """
+    Give a pin a new name (or rename an existing device).
+    The old name is removed; the new name points to the same pin and keeps all settings.
+    identifier can be a current name OR a BCM pin number.
+    """
+    save = config is None
     config = config or load_config()
-    return {
-        "success": True,
-        "devices": [
-            {
-                "name": name,
-                "pin": d["pin"],
-                "type": d["type"],
-                "description": d.get("description", ""),
-            }
-            for name, d in config.get("devices", {}).items()
-        ],
-    }
+    devices = config.setdefault("devices", {})
+
+    try:
+        pin, old_device = _resolve(identifier, config)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    if new_name in devices and devices[new_name]["pin"] != pin:
+        return {"success": False,
+                "error": f"'{new_name}' is already used by pin {devices[new_name]['pin']}."}
+
+    # Remove old entry (if it existed under a name)
+    old_name = str(identifier)
+    if old_name in devices:
+        del devices[old_name]
+    else:
+        # Was referenced by number — remove whichever entry has this pin
+        for k, v in list(devices.items()):
+            if v["pin"] == pin:
+                del devices[k]
+                break
+
+    # Write under new name
+    updated = {**old_device, "pin": pin}
+    devices[new_name] = updated
+
+    if save:
+        _save_config(config)
+
+    return {"success": True, "renamed_to": new_name, "pin": pin,
+            "description": updated.get("description", "")}
 
 
-def register(name: str, pin: int, device_type: str,
+def register(name: str, pin: int, device_type: str = "output",
              description: str = "", **kwargs) -> dict:
-    """
-    Add or update a device in pin_config.json.
-
-    device_type: "output" | "relay" | "input" | "pwm"
-    Extra kwargs: active_low, pull_up, frequency, etc.
-    """
+    """Register a pin with a name and type. Overwrites if name already exists."""
     valid_types = ("output", "relay", "input", "pwm")
     if device_type not in valid_types:
-        return {"success": False, "error": f"type must be one of: {', '.join(valid_types)}"}
+        return {"success": False,
+                "error": f"type must be one of: {', '.join(valid_types)}"}
     config = load_config()
     config.setdefault("devices", {})[name] = {
-        "pin": pin,
-        "type": device_type,
-        "description": description,
-        **kwargs,
+        "pin": pin, "type": device_type, "description": description, **kwargs,
     }
     _save_config(config)
     return {"success": True, "registered": name, "pin": pin,
             "type": device_type, "description": description}
 
 
-def unregister(name: str) -> dict:
-    """Remove a device from pin_config.json."""
+def unregister(identifier: str | int) -> dict:
+    """Remove a pin's registration — accepts name or BCM pin number."""
     config = load_config()
-    if name not in config.get("devices", {}):
-        return {"success": False, "error": f"Device '{name}' not found."}
-    del config["devices"][name]
-    _save_config(config)
-    return {"success": True, "unregistered": name}
+    devices = config.get("devices", {})
+
+    # By name
+    if str(identifier) in devices:
+        del devices[str(identifier)]
+        _save_config(config)
+        return {"success": True, "unregistered": str(identifier)}
+
+    # By pin number
+    try:
+        pin = int(identifier)
+        for name, d in list(devices.items()):
+            if d["pin"] == pin:
+                del devices[name]
+                _save_config(config)
+                return {"success": True, "unregistered": name, "pin": pin}
+    except (ValueError, TypeError):
+        pass
+
+    return {"success": False, "error": f"'{identifier}' not found in config."}
+
+
+def list_devices(config: dict | None = None) -> dict:
+    """List all registered devices."""
+    config = config or load_config()
+    return {
+        "success": True,
+        "devices": [
+            {"name": name, "pin": d["pin"], "type": d["type"],
+             "description": d.get("description", "")}
+            for name, d in config.get("devices", {}).items()
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
 # CLI dispatcher
 # ---------------------------------------------------------------------------
 
-def _coerce_bool(val: Any) -> bool:
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, int):
-        return bool(val)
-    if isinstance(val, str):
-        return val.strip().lower() in ("true", "1", "on", "high")
-    raise ValueError(f"Cannot convert {val!r} to bool")
-
-
 def dispatch(payload: dict) -> dict:
     cmd = payload.get("command", "")
-    device = payload.get("device", "")
+
+    # Accepts "device" or "pin" as the identifier field
+    identifier = payload.get("device") or payload.get("pin")
 
     if cmd == "activate":
-        return activate(device)
+        if identifier is None:
+            return {"success": False, "error": "activate requires: device (name or pin number)"}
+        return activate(identifier)
 
     if cmd == "deactivate":
-        return deactivate(device)
+        if identifier is None:
+            return {"success": False, "error": "deactivate requires: device (name or pin number)"}
+        return deactivate(identifier)
 
     if cmd == "toggle":
-        return toggle(device)
+        if identifier is None:
+            return {"success": False, "error": "toggle requires: device (name or pin number)"}
+        return toggle(identifier)
 
     if cmd == "read":
-        return read(device)
+        if identifier is None:
+            return {"success": False, "error": "read requires: device (name or pin number)"}
+        return read(identifier)
 
     if cmd == "set":
         level = payload.get("level")
-        if level is None:
-            return {"success": False, "error": "set requires: device, level (0.0–1.0)"}
-        return set_level(device, float(level))
+        if identifier is None or level is None:
+            return {"success": False, "error": "set requires: device (name or pin number), level (0.0–1.0)"}
+        return set_level(identifier, float(level))
 
-    if cmd == "list_devices":
-        return list_devices()
+    if cmd == "rename":
+        old = payload.get("device") or payload.get("pin") or payload.get("old")
+        new = payload.get("new_name") or payload.get("name")
+        if not old or not new:
+            return {"success": False,
+                    "error": "rename requires: device (current name or pin number), new_name"}
+        return rename(old, new)
 
     if cmd == "register":
         name = payload.get("name")
         pin = payload.get("pin")
-        dtype = payload.get("type")
-        if not all([name, pin is not None, dtype]):
-            return {"success": False, "error": "register requires: name, pin, type. Optional: description, active_low, pull_up, frequency"}
+        dtype = payload.get("type", "output")
+        if not name or pin is None:
+            return {"success": False, "error": "register requires: name, pin. Optional: type, description"}
         extras = {k: v for k, v in payload.items()
                   if k not in ("command", "name", "pin", "type", "description")}
         return register(name, int(pin), dtype, payload.get("description", ""), **extras)
 
     if cmd == "unregister":
-        name = payload.get("name")
-        if not name:
-            return {"success": False, "error": "unregister requires: name"}
-        return unregister(name)
+        target = payload.get("name") or payload.get("device") or payload.get("pin")
+        if not target:
+            return {"success": False, "error": "unregister requires: name or pin"}
+        return unregister(target)
 
-    # Raw pin access (kept for advanced use)
-    if cmd == "digital_write":
-        pin = payload.get("pin")
-        val = payload.get("value")
-        if pin is None or val is None:
-            return {"success": False, "error": "digital_write requires: pin, value"}
-        return _write_pin(int(pin), _coerce_bool(val))
-
-    if cmd == "digital_read":
-        pin = payload.get("pin")
-        if pin is None:
-            return {"success": False, "error": "digital_read requires: pin"}
-        return _read_pin(int(pin), bool(payload.get("pull_up", False)))
+    if cmd == "list_devices":
+        return list_devices()
 
     if cmd == "list_backends":
         return {
@@ -317,8 +381,8 @@ def dispatch(payload: dict) -> dict:
         "success": False,
         "error": (
             f"Unknown command: '{cmd}'. "
-            "Valid commands: activate, deactivate, toggle, read, set, "
-            "list_devices, register, unregister, digital_write, digital_read, list_backends"
+            "Valid: activate, deactivate, toggle, read, set, rename, "
+            "register, unregister, list_devices, list_backends"
         ),
     }
 
@@ -329,25 +393,23 @@ def dispatch(payload: dict) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="GPIO Skill for OpenClaw — control named devices on Raspberry Pi GPIO"
+        description="GPIO Skill for OpenClaw — control Raspberry Pi GPIO by name or pin number"
     )
     parser.add_argument("--json", metavar="JSON",
-                        help='JSON payload, e.g. \'{"command":"activate","device":"kitchen_light"}\'')
+                        help='JSON payload, e.g. \'{"command":"activate","device":"17"}\'')
     args = parser.parse_args()
 
     raw = args.json if args.json else sys.stdin.read().strip()
 
     if not raw:
-        result = {"success": False,
-                  "error": "No input. Use --json '...' or pipe JSON to stdin."}
-        print(json.dumps(result))
+        print(json.dumps({"success": False,
+                          "error": "No input. Use --json '...' or pipe JSON to stdin."}))
         sys.exit(1)
 
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as e:
-        result = {"success": False, "error": f"Invalid JSON: {e}"}
-        print(json.dumps(result))
+        print(json.dumps({"success": False, "error": f"Invalid JSON: {e}"}))
         sys.exit(1)
 
     result = dispatch(payload)
